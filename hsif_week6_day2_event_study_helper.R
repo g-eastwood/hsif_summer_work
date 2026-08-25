@@ -1,0 +1,143 @@
+# =====================================================================
+# HSIF Applied Causal Inference, Week 6 Day 2
+# Helper code: two event studies from hsif_week6_day2_synthetic.csv
+#   Figure 1: pooled event study (all treated vs. untreated)
+#   Figure 2: interacted event study (schools-only vs. schools + roads)
+# Packages: fixest (estimation), ggplot2 + dplyr (data prep, visualization)
+# =====================================================================
+
+library(fixest)    # feols(): fixed effects regression, clustered SEs
+library(dplyr)     # data manipulation
+library(ggplot2)   # plotting
+
+# ---------------------------------------------------------------------
+# 0. DATA PREP
+# ---------------------------------------------------------------------
+
+df <- read.csv("hsif_week6_day2_synthetic.csv")
+
+# Month string -> running time index t (1, 2, ...)
+df <- df %>%
+  mutate(month_date = as.Date(paste0(month, "-01")),
+         t = as.integer(factor(month_date)))
+
+# Event time k = months since adoption (March 2026), treated units only
+t_adopt <- df$t[df$month == "2026-03"][1]
+df <- df %>% mutate(k = t - t_adopt)
+
+# Summed endpoint bin: collapse all k <= -12 into a single k = -12 bin.
+# This balances time-to-treatment: distant leads are identified by the
+# same units but estimated as one coefficient rather than traced monthly.
+df <- df %>% mutate(k_bin = pmax(k, -12))
+
+# Reference period: k = -2, chosen because the program was announced in
+# December 2025, so k = -1 (Feb 2026) is contaminated by anticipation.
+# Coding trick: set untreated units to the reference value. They then
+# generate no event-time dummies and identify the counterfactual through
+# the fixed effects alone.
+REF <- -2
+df <- df %>% mutate(k_pool = if_else(treated == 1, k_bin, REF))
+
+# ---------------------------------------------------------------------
+# 1. POOLED EVENT STUDY
+# ---------------------------------------------------------------------
+
+# ESTIMATION.
+# i(k_pool, ref = REF): one dummy per event time, k = -2 omitted.
+# | municipality_id + t: unit and month fixed effects.
+# cluster = ~municipality_id: SEs clustered at the randomization unit.
+m_pool <- feols(incidents ~ i(k_pool, ref = REF) |
+                  municipality_id + t,
+                data = df, cluster = ~municipality_id)
+
+# Extract coefficients and 95% CIs into a plotting data frame,
+# then append the reference period as a zero row so it appears on the axis.
+coefs_pool <- data.frame(
+  k   = as.numeric(gsub("k_pool::", "", names(coef(m_pool)))),
+  est = coef(m_pool),
+  lo  = confint(m_pool)[, 1],
+  hi  = confint(m_pool)[, 2]) %>%
+  bind_rows(data.frame(k = REF, est = 0, lo = NA, hi = NA)) %>%
+  arrange(k)
+
+# VISUALIZATION.
+ggplot(coefs_pool, aes(x = k, y = est)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +   # zero line
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") + # adoption
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.25, color = "gray30") + # 95% CIs
+  geom_point(color = "gray30", size = 1.8) +                            # estimates
+  geom_point(data = filter(coefs_pool, k == REF),                       # open marker
+             shape = 21, fill = "white", color = "gray30", size = 1.8) +
+  labs(x = "event time k (months since March 2026)",                    # text
+       y = "effect on violent incidents",
+       title = "Pooled event study: all treated vs. untreated (ref k = -2)") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(color = "#800000"))
+
+ggsave("es_pooled_R.png", width = 8, height = 4.2, dpi = 150)
+
+# ---------------------------------------------------------------------
+# 2. INTERACTED EVENT STUDY (schools-only vs. schools + roads)
+# ---------------------------------------------------------------------
+
+# Two separate sets of event-time dummies, one per treated group.
+# Same coding trick: each group variable equals the reference value for
+# every unit outside that group, so its dummies switch on only for the
+# group's own treated observations.
+df <- df %>%
+  mutate(k_schools = if_else(treated == 1 & supplement == 0, k_bin, REF),
+         k_roads   = if_else(treated == 1 & supplement == 1, k_bin, REF))
+
+# ESTIMATION. One regression, two dummy sets; both paths measured
+# against the untreated municipalities through the shared fixed effects.
+m_int <- feols(incidents ~ i(k_schools, ref = REF) + i(k_roads, ref = REF) |
+                 municipality_id + t,
+               data = df, cluster = ~municipality_id)
+
+# Extract both coefficient sets; tag each with its group label.
+ci <- confint(m_int)
+coefs_int <- data.frame(name = names(coef(m_int)),
+                        est  = coef(m_int),
+                        lo   = ci[, 1], hi = ci[, 2]) %>%
+  mutate(group = if_else(grepl("k_schools", name),
+                         "schools only", "schools + roads"),
+         k = as.numeric(gsub("k_schools::|k_roads::", "", name))) %>%
+  bind_rows(data.frame(k = REF, est = 0, lo = NA, hi = NA,
+                       group = c("schools only", "schools + roads")))
+
+# VISUALIZATION. position_dodge offsets the two series so whiskers
+# do not overlap at each k.
+t_supp_k <- df$t[df$month == "2026-10"][1] - t_adopt   # k of the October split
+
+ggplot(coefs_int, aes(x = k, y = est, color = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = t_supp_k - 0.5, linetype = "dotted",          # October line
+             color = "#B3541E", linewidth = 0.7) +
+  annotate("text", x = t_supp_k - 0.5, y = 2.5,                         # text label
+           label = "Oct 2026: supplement begins",
+           color = "#B3541E", size = 3, hjust = 0.5) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.25,
+                position = position_dodge(width = 0.45)) +
+  geom_point(size = 1.8, position = position_dodge(width = 0.45)) +
+  scale_color_manual(values = c("schools only" = "gray30",
+                                "schools + roads" = "#800000")) +
+  labs(x = "event time k (months since March 2026)",
+       y = "effect on violent incidents",
+       title = "Interacted event study: schools-only vs. schools + roads (ref k = -2)",
+       color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(color = "#800000"),
+        legend.position = c(0.15, 0.15))
+
+ggsave("es_interaction_R.png", width = 8, height = 4.2, dpi = 150)
+
+# ---------------------------------------------------------------------
+# 3. CHECKS
+# ---------------------------------------------------------------------
+# Leads should be flat near zero; expect a small dip at k = -1
+# (anticipation of the December 2025 announcement).
+# The two series should track together through k = 6 and separate
+# from k = 7 (October 2026). The gap between them at the panel's end
+# is the supplement's incremental effect.
+etable(m_pool, m_int, cluster = ~municipality_id)

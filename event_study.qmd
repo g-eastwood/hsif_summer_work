@@ -1,0 +1,273 @@
+---
+title: "Event Study: School Safety Program (March 2026)"
+author: "Gabriela Eastwood"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+This document presents two event-study estimates of the causal effect of a
+school safety program on municipal violent incidents.
+
+**Design summary**
+
+| Feature | Detail |
+|---|---|
+| Treatment | School safety program adopted **March 2026** |
+| Supplement | Roads component added for half of treated municipalities, **October 2026** |
+| Announcement | December 2025 (potential anticipation at k = −1) |
+| Outcome | Monthly violent incidents per municipality |
+| Identification | Two-way fixed effects (municipality + month); SEs clustered by municipality |
+| Reference period | k = −2 (January 2026) |
+| Lead binning | All leads ≤ −12 collapsed into one bin (k = −12) |
+
+The reference period is set to **k = −2** rather than k = −1 because the
+December 2025 announcement is likely to contaminate the period immediately
+before adoption (k = −1) through anticipation effects.
+
+---
+
+## Setup
+
+```{r}
+#| label: setup
+
+library(fixest)   # feols(): fixed effects OLS, clustered SEs
+library(dplyr)    # data manipulation
+library(ggplot2)  # plotting
+```
+
+---
+
+## Data
+
+```{r}
+#| label: load-data
+
+df <- read.csv("hsif_week6_day2_synthetic.csv")
+glimpse(df)
+```
+
+### Time index and event time
+
+We convert the `month` string to a proper date, then to a compact integer
+time index `t`. Event time `k` measures months relative to the adoption date
+(March 2026 ≡ k = 0).
+
+```{r}
+#| label: time-index
+
+# Month string → running index t (1, 2, …)
+df <- df %>%
+  mutate(month_date = as.Date(paste0(month, "-01")),
+         t = as.integer(factor(month_date)))
+
+# Event time: k = t − t_adopt; adoption month = March 2026 → k = 0
+t_adopt <- df$t[df$month == "2026-03"][1]
+df <- df %>% mutate(k = t - t_adopt)
+
+cat("Adoption time index:", t_adopt,
+    "\nEvent-time range:", range(df$k), "\n")
+```
+
+### Lead binning and reference coding
+
+Distant leads (k ≤ −12) are collapsed into a single bin to keep the
+pre-trend plot legible and well-identified. Untreated municipalities are
+assigned the reference value (k = −2) so they contribute no event-time
+dummies and identify the counterfactual purely through fixed effects.
+
+```{r}
+#| label: event-coding
+
+REF <- -2   # reference period
+
+# Bin extreme leads
+df <- df %>% mutate(k_bin = pmax(k, -12))
+
+# Pooled event-time variable: untreated → reference, treated → k_bin
+df <- df %>% mutate(k_pool = if_else(treated == 1, k_bin, REF))
+
+# Interacted variables: one per treatment arm, both equal REF outside the arm
+df <- df %>%
+  mutate(k_schools = if_else(treated == 1 & supplement == 0, k_bin, REF),
+         k_roads   = if_else(treated == 1 & supplement == 1, k_bin, REF))
+```
+
+Quick balance check — observations per treatment arm:
+
+```{r}
+#| label: balance-check
+
+df %>%
+  distinct(municipality_id, treated, supplement) %>%
+  count(treated, supplement, name = "n_municipalities")
+```
+
+---
+
+## Figure 1 — Pooled Event Study
+
+**All treated municipalities vs. untreated controls.**
+
+Pre-trends should be flat near zero. A small dip at k = −1 is consistent with
+anticipation effects following the December 2025 announcement. Post-adoption
+coefficients capture the average effect of the program across both arms.
+
+```{r}
+#| label: pooled-estimation
+
+m_pool <- feols(incidents ~ i(k_pool, ref = REF) |
+                  municipality_id + t,
+                data = df, cluster = ~municipality_id)
+
+summary(m_pool)
+```
+
+```{r}
+#| label: pooled-plot
+#| fig-width: 8
+#| fig-height: 4.2
+#| fig-cap: "Pooled event study. Dots are OLS estimates; bars are 95% CIs. The open dot at k = −2 marks the reference period (estimate normalized to zero). The dashed vertical line sits between k = −1 and k = 0, marking the onset of treatment."
+
+coefs_pool <- data.frame(
+  k   = as.numeric(gsub("k_pool::", "", names(coef(m_pool)))),
+  est = coef(m_pool),
+  lo  = confint(m_pool)[, 1],
+  hi  = confint(m_pool)[, 2]
+) %>%
+  bind_rows(data.frame(k = REF, est = 0, lo = NA, hi = NA)) %>%
+  arrange(k)
+
+ggplot(coefs_pool, aes(x = k, y = est)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.25, color = "gray30") +
+  geom_point(color = "gray30", size = 1.8) +
+  geom_point(data = filter(coefs_pool, k == REF),
+             shape = 21, fill = "white", color = "gray30", size = 1.8) +
+  labs(x = "event time k (months since March 2026)",
+       y = "effect on violent incidents",
+       title = "Pooled event study: all treated vs. untreated (ref k = −2)") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(color = "#800000"))
+```
+
+---
+
+## Figure 2 — Interacted Event Study
+
+**Schools-only vs. schools + roads (supplement).**
+
+A single regression with two sets of event-time dummies — one per arm —
+measured against the same untreated control group through the shared fixed
+effects. The two series should track together through k = 6 (September 2026)
+and diverge from k = 7 (October 2026) when the supplement begins. The gap
+between them at the panel's end is the supplement's incremental effect.
+
+```{r}
+#| label: interacted-estimation
+
+m_int <- feols(incidents ~ i(k_schools, ref = REF) + i(k_roads, ref = REF) |
+                 municipality_id + t,
+               data = df, cluster = ~municipality_id)
+
+summary(m_int)
+```
+
+```{r}
+#| label: interacted-plot
+#| fig-width: 8
+#| fig-height: 4.2
+#| fig-cap: "Interacted event study. Gray = schools-only arm; maroon = schools + roads supplement. Estimates are dodged slightly to avoid overlapping CIs. The dotted vertical line marks October 2026, when the roads supplement began."
+
+ci <- confint(m_int)
+coefs_int <- data.frame(
+  name = names(coef(m_int)),
+  est  = coef(m_int),
+  lo   = ci[, 1],
+  hi   = ci[, 2]
+) %>%
+  mutate(
+    group = if_else(grepl("k_schools", name), "schools only", "schools + roads"),
+    k     = as.numeric(gsub("k_schools::|k_roads::", "", name))
+  ) %>%
+  bind_rows(
+    data.frame(k = REF, est = 0, lo = NA, hi = NA,
+               group = c("schools only", "schools + roads"))
+  )
+
+# Month index of the October 2026 supplement
+t_supp_k <- df$t[df$month == "2026-10"][1] - t_adopt
+
+ggplot(coefs_int, aes(x = k, y = est, color = group)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = t_supp_k - 0.5, linetype = "dotted",
+             color = "#B3541E", linewidth = 0.7) +
+  annotate("text", x = t_supp_k - 0.5, y = 2.5,
+           label = "Oct 2026: supplement begins",
+           color = "#B3541E", size = 3, hjust = 0.5) +
+  geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.25,
+                position = position_dodge(width = 0.45)) +
+  geom_point(size = 1.8, position = position_dodge(width = 0.45)) +
+  scale_color_manual(values = c("schools only" = "gray30",
+                                "schools + roads" = "#800000")) +
+  labs(x = "event time k (months since March 2026)",
+       y = "effect on violent incidents",
+       title = "Interacted event study: schools-only vs. schools + roads (ref k = −2)",
+       color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title  = element_text(color = "#800000"),
+        legend.position = c(0.15, 0.15))
+```
+
+---
+
+## Regression Table
+
+Both models side-by-side with clustered standard errors.
+
+```{r}
+#| label: etable
+
+etable(m_pool, m_int,
+       cluster      = ~municipality_id,
+       headers      = c("Pooled", "Interacted"),
+       title        = "Event-study estimates (outcome: violent incidents)")
+```
+
+---
+
+## Interpretation Guide
+
+**Pre-trend check (leads, k < −2)**
+: Coefficients should be statistically indistinguishable from zero. A
+  systematic upward or downward trend would indicate that treated and control
+  municipalities were on different trajectories before the program — a
+  violation of parallel trends.
+
+**Anticipation (k = −1)**
+: A negative coefficient here is plausible given the December 2025
+  announcement. It does *not* invalidate the design but should be noted.
+
+**Impact (k ≥ 0)**
+: The pooled post-period coefficients capture the average intention-to-treat
+  effect. Negative values indicate a reduction in violent incidents.
+
+**Supplement gap (k ≥ 7)**
+: In the interacted plot, any divergence between the two series after October
+  2026 is attributable to the roads supplement. The gap's magnitude and its
+  CIs determine whether the supplement has a statistically distinguishable
+  incremental effect.
