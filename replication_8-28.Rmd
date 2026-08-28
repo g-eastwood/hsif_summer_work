@@ -92,8 +92,11 @@ summary(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt / 2))   # half
 summary(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt * 2))   # double
 ```
 
+
 ```{r}
 # 2d. Donut estimates
+donut_results <- list()   # initialize first
+
 for (r_hole in c(1, 2)) {
   d <- filter(df, abs(rank_norm) > r_hole)
   cat("\n--- donut =", r_hole, "| n =", nrow(d), "---\n")
@@ -112,8 +115,25 @@ extract_rd <- function(model, label) {
   )
 }
 
+specs <- bind_rows(
+  extract_rd(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = 6,
+                      kernel = "triangular"),          "Paper (h=6)"),
+  extract_rd(main,                                     "MSE-optimal"),
+  extract_rd(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt / 2), "h / 2"),
+  extract_rd(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt * 2), "2h"),
+  extract_rd(donut_results[["donut_1"]],               "Donut (r=1)"),
+  extract_rd(donut_results[["donut_2"]],               "Donut (r=2)")
+) %>%
+  mutate(spec = factor(spec, levels = rev(c(
+    "Paper (h=6)", "MSE-optimal", "h / 2", "2h", "Donut (r=1)", "Donut (r=2)"
+  ))))
 
-
+ggplot(specs, aes(x = estimate, y = spec)) +
+  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+  labs(x = "RD estimate (robust 95% CI)", y = NULL,
+       title = "Specification chart — total casualties") +
+  theme_minimal()
 ```
 
 ```{r}
