@@ -1,0 +1,196 @@
+---
+title: "replication_8-28"
+author: "Sonya Doubledee"
+date: "2026-08-28"
+output: html_document
+---
+
+# Replication Memo
+### Amil, Gabi, Sofie, Sonya 
+
+## Section 1: Project Design and Inference Problem 
+Understanding Aid introduces a regressing discontinuity (RD) design to investigate the effect of aid on 22 provinces just past a poverty eligibility threshold, specifically centered around the KALAHI-CIDSS program. Crucially, this analysis only focused on the initial phase, including the program’s announcement in December 2002 and the implementation in June 2003. The design attempts to estimate discontinuous change in conflict casualties using a running variable and a kernel bandwidth of 6, correcting for misclassification near the threshold. 
+
+For this paper, there is an explicit violation of the exclusion restriction assumption, given that participation is endogenous to conflict. This means that not all municipalities who were eligible participated in the program because they were explicitly dropped due to ‘insurgent-driven’ conflict. Some municipalities will thus sit on the wrong side of the reconstructed line, substantially biasing the eligibility jump estimation, moving the estimate toward zero. 
+Further, this paper expresses concern over the potential ability to manipulate poverty rankings around the threshold. This concern has potential to violate the independence assumption if manipulation is occurring, as it can no longer be assumed that the makeup of the samples just above and below the threshold are as good as randomly assigned to treatment or not. This concern therefore risks biasing the estimates produced in the study. 
+
+The design thus estimates intention to treat and not participation, and subsequently attempts to argue that this effect could explain alone the increase in violence. This generates indirect validity checks, thus the balance tests are unable to validate the RD design, and have to stand in for the first stage. The density test is also unable to detect manipulation because it is discrete (one municipality per rank per province on each side of the cutoff). The authors attempt to argue against a fuzzy RD, arguing eligibility should not be included as an instrument. See page XX for further critique of this decision. 
+
+
+```{r echo=FALSE}
+library(rdrobust)   
+library(rddensity)  # density test on the underlying score
+library(fixest)     # event study for the DiD complement
+library(dplyr)
+library(ggplot2)
+library(haven)  # the package ships Stata .dta files
+library(tidyverse) # view data
+```
+
+
+```{r echo=FALSE}
+DATA_FILE <- "./data/AUF-replication-data-and-code/AUF_replication_data.dta"
+#variable map
+
+V_RANK     <- "rank"              # within-province poverty rank (reconstructed)
+V_CUT_N    <- "num_muni"         # number of municipalities in province
+V_OUTCOME  <- "totcas"           # total conflict casualties
+V_CAS_INS  <- "eninit_cas"       # insurgent-initiated casualties
+V_CAS_GOV  <- "govinit_cas"      # government-initiated casualties
+V_RECEIPT  <- "kalahimunicipality"# actual KALAHI-CIDSS receipt
+V_MUNI     <- "municipality"
+V_TIME     <- "month"
+V_START <- 516
+            # program start timing
+```
+
+
+```{r echo=FALSE}
+df <- read_dta(DATA_FILE) %>%
+  mutate(
+    quartile  = round(.data[[V_CUT_N]] / 4),          # matches Stata round()
+    rank_norm = .data[[V_RANK]] - quartile - 0.5,     # correct sign + 0.5 offset
+    eligible  = as.integer(rank_norm >= 0),
+    el_rank   = eligible * rank_norm,
+    r2        = rank_norm^2,
+    elr2      = el_rank^2
+  ) 
+
+df <- df %>% filter(month >= 516 & month <= 551)
+```
+
+## Section 2: Replication
+
+```{r}
+#paper's specification
+paper_summary <- summary(rdrobust(df[[V_OUTCOME]], -df$rank_norm, c = 0, h = 6, kernel = "triangular"))
+
+print(paper_summary)
+```
+
+
+```{r}
+#rd plot
+
+rdplot(
+  y = df[[V_OUTCOME]],
+  x = df$rank_norm,
+  c = 0,
+  p=2,
+  x.label = "Poverty rank (centered at cutoff)",
+  y.label = "Conflict casualties"
+)
+```
+
+
+```{r}
+# Modern inference: MSE-optimal h; report the Robust row.
+main <- rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0)
+summary(main)
+h_opt <- main$bws["h", "left"]
+summary(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt / 2))   # half
+summary(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt * 2))   # double
+```
+
+```{r}
+# 2d. Donut estimates
+for (r_hole in c(1, 2)) {
+  d <- filter(df, abs(rank_norm) > r_hole)
+  cat("\n--- donut =", r_hole, "| n =", nrow(d), "---\n")
+  m <- rdrobust(d[[V_OUTCOME]], d$rank_norm, c = 0, h = 6)
+  print(summary(m))
+  donut_results[[paste0("donut_", r_hole)]] <- m
+}
+
+# 2e. Specification chart
+extract_rd <- function(model, label) {
+  tibble(
+    spec     = label,
+    estimate = model$coef["Conventional", 1],
+    ci_lo    = model$ci["Robust", 1],
+    ci_hi    = model$ci["Robust", 2]
+  )
+}
+
+
+
+```
+
+```{r}
+# ---------------------------------------------------------------------
+# BLOCK 3. TIMING AND ACTORS (Stage 3)
+# ---------------------------------------------------------------------
+# Initiator splits: separate outcomes, each its own RD, robust rows.
+summary(rdrobust(df[[V_CAS_INS]], df$rank_norm, c = 0))
+summary(rdrobust(df[[V_CAS_GOV]], df$rank_norm, c = 0))
+# Measurement probe: does the sum of the splits track the total at the
+# cutoff? A gap suggests initiator coding varies with program presence.
+```
+
+
+```{r}
+# ---------------------------------------------------------------------
+# BLOCK 4. THE COMPLEMENT AND A BETTER CLOCK (Stage 4)
+# ---------------------------------------------------------------------
+# 4a. DiD event study: eligible vs ineligible around program start.
+# Tuesday's checklist: reference period, window, endpoint bins, pre-trends.
+
+V_START <- 516   # program start month (Stata date format)
+
+df <- read_dta(DATA_FILE) %>%
+  mutate(
+    quartile  = round(.data[[V_CUT_N]] / 4),
+    rank_norm = -(.data[[V_RANK]] - quartile - 0.5),
+    eligible  = as.integer(rank_norm >= 0)
+  ) %>%
+  filter(month >= 504 & month <= 551) %>%   # 12 months pre-program
+  mutate(
+    elig  = as.integer(rank_norm >= 0),
+    k     = .data[[V_TIME]] - V_START,
+    k_bin = pmax(pmin(k, 8), -8),
+    k_es  = if_else(elig == 1, k_bin, -1)
+  )
+
+m_es <- feols(
+  as.formula(paste0(V_OUTCOME, " ~ i(k_es, ref = -1) | ",
+                    V_MUNI, " + ", V_TIME)),
+  data    = df,
+  cluster = as.formula(paste0("~", V_MUNI))
+)
+iplot(m_es, main = "DiD event study: eligible vs. ineligible")
+
+```
+
+
+
+```{r}
+
+#rd event study
+
+rd_path <- lapply(sort(unique(df$k_bin)), function(kk) {
+  d <- filter(df, k_bin == kk)
+  if (nrow(d) < 100) return(NULL)          # skip thin cells
+  fit <- tryCatch(rdrobust(d[[V_OUTCOME]], d$rank_norm, c = 0),
+                  error = function(e) NULL)
+  if (is.null(fit)) return(NULL)
+  data.frame(k   = kk,
+             est = fit$coef["Robust", 1],
+             lo  = fit$ci["Robust", 1],
+             hi  = fit$ci["Robust", 2])
+}) %>% bind_rows()
+
+ggplot(rd_path, aes(x = k, y = est)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+  geom_pointrange(aes(ymin = lo, ymax = hi), color = "#800000",
+                  size = 0.35) +
+  labs(x = "event time (periods since program start)",
+       y = "RD estimate at the cutoff",
+       title = "The RD event study: period-by-period jumps") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(color = "#800000"))
+ggsave("rd_event_study.png", width = 8, height = 4.2, dpi = 150)
+
+
+```
+
