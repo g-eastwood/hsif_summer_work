@@ -6,16 +6,16 @@ output: html_document
 ---
 
 # Replication Memo
-### Amil, Gabi, Sofie, Sonya 
 
-## Section 1: Project Design and Inference Problem 
-Understanding Aid introduces a regressing discontinuity (RD) design to investigate the effect of aid on 22 provinces just past a poverty eligibility threshold, specifically centered around the KALAHI-CIDSS program. Crucially, this analysis only focused on the initial phase, including the program’s announcement in December 2002 and the implementation in June 2003. The design attempts to estimate discontinuous change in conflict casualties using a running variable and a kernel bandwidth of 6, correcting for misclassification near the threshold. 
+### Amil, Gabi, Sofie, Sonya
 
-For this paper, there is an explicit violation of the exclusion restriction assumption, given that participation is endogenous to conflict. This means that not all municipalities who were eligible participated in the program because they were explicitly dropped due to ‘insurgent-driven’ conflict. Some municipalities will thus sit on the wrong side of the reconstructed line, substantially biasing the eligibility jump estimation, moving the estimate toward zero. 
-Further, this paper expresses concern over the potential ability to manipulate poverty rankings around the threshold. This concern has potential to violate the independence assumption if manipulation is occurring, as it can no longer be assumed that the makeup of the samples just above and below the threshold are as good as randomly assigned to treatment or not. This concern therefore risks biasing the estimates produced in the study. 
+## Section 1: Project Design and Inference Problem
 
-The design thus estimates intention to treat and not participation, and subsequently attempts to argue that this effect could explain alone the increase in violence. This generates indirect validity checks, thus the balance tests are unable to validate the RD design, and have to stand in for the first stage. The density test is also unable to detect manipulation because it is discrete (one municipality per rank per province on each side of the cutoff). The authors attempt to argue against a fuzzy RD, arguing eligibility should not be included as an instrument. See page XX for further critique of this decision. 
+Understanding Aid introduces a regressing discontinuity (RD) design to investigate the effect of aid on 22 provinces just past a poverty eligibility threshold, specifically centered around the KALAHI-CIDSS program. Crucially, this analysis only focused on the initial phase, including the program’s announcement in December 2002 and the implementation in June 2003. The design attempts to estimate discontinuous change in conflict casualties using a running variable and a kernel bandwidth of 6, correcting for misclassification near the threshold.
 
+For this paper, there is an explicit violation of the exclusion restriction assumption, given that participation is endogenous to conflict. This means that not all municipalities who were eligible participated in the program because they were explicitly dropped due to ‘insurgent-driven’ conflict. Some municipalities will thus sit on the wrong side of the reconstructed line, substantially biasing the eligibility jump estimation, moving the estimate toward zero. Further, this paper expresses concern over the potential ability to manipulate poverty rankings around the threshold. This concern has potential to violate the independence assumption if manipulation is occurring, as it can no longer be assumed that the makeup of the samples just above and below the threshold are as good as randomly assigned to treatment or not. This concern therefore risks biasing the estimates produced in the study.
+
+The design thus estimates intention to treat and not participation, and subsequently attempts to argue that this effect could explain alone the increase in violence. This generates indirect validity checks, thus the balance tests are unable to validate the RD design, and have to stand in for the first stage. The density test is also unable to detect manipulation because it is discrete (one municipality per rank per province on each side of the cutoff). The authors attempt to argue against a fuzzy RD, arguing eligibility should not be included as an instrument. See page XX for further critique of this decision.
 
 ```{r echo=FALSE}
 library(rdrobust)   
@@ -27,9 +27,8 @@ library(haven)  # the package ships Stata .dta files
 library(tidyverse) # view data
 ```
 
-
 ```{r echo=FALSE}
-DATA_FILE <- "./data/AUF-replication-data-and-code/AUF_replication_data.dta"
+DATA_FILE <- "AUF_replication_data.dta"
 #variable map
 
 V_RANK     <- "rank"              # within-province poverty rank (reconstructed)
@@ -44,7 +43,6 @@ V_START <- 516
             # program start timing
 ```
 
-
 ```{r echo=FALSE}
 df <- read_dta(DATA_FILE) %>%
   mutate(
@@ -56,7 +54,7 @@ df <- read_dta(DATA_FILE) %>%
     elr2      = el_rank^2
   ) 
 
-df <- df %>% filter(month >= 516 & month <= 551)
+df <- df %>% filter(month >= 516 & month <= 521)
 ```
 
 ## Section 2: Replication
@@ -68,7 +66,6 @@ paper_summary <- summary(rdrobust(df[[V_OUTCOME]], -df$rank_norm, c = 0, h = 6, 
 print(paper_summary)
 ```
 
-
 ```{r}
 #rd plot
 
@@ -76,12 +73,11 @@ rdplot(
   y = df[[V_OUTCOME]],
   x = df$rank_norm,
   c = 0,
-  p=2,
+  p = 2, 
   x.label = "Poverty rank (centered at cutoff)",
   y.label = "Conflict casualties"
 )
 ```
-
 
 ```{r}
 # Modern inference: MSE-optimal h; report the Robust row.
@@ -91,7 +87,6 @@ h_opt <- main$bws["h", "left"]
 summary(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt / 2))   # half
 summary(rdrobust(df[[V_OUTCOME]], df$rank_norm, c = 0, h = h_opt * 2))   # double
 ```
-
 
 ```{r}
 # 2d. Donut estimates
@@ -147,7 +142,6 @@ summary(rdrobust(df[[V_CAS_GOV]], df$rank_norm, c = 0))
 # cutoff? A gap suggests initiator coding varies with program presence.
 ```
 
-
 ```{r}
 # ---------------------------------------------------------------------
 # BLOCK 4. THE COMPLEMENT AND A BETTER CLOCK (Stage 4)
@@ -181,8 +175,6 @@ iplot(m_es, main = "DiD event study: eligible vs. ineligible")
 
 ```
 
-
-
 ```{r}
 
 #rd event study
@@ -213,4 +205,3 @@ ggsave("rd_event_study.png", width = 8, height = 4.2, dpi = 150)
 
 
 ```
-
