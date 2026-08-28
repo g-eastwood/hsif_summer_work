@@ -1,0 +1,10 @@
+# macOS metadata
+.DS_Store
+
+# Data files — not redistributed outside course
+*.dta
+*.zip
+112831-V1/
+
+# Rendered HTML output (large, reproducible from .qmd)
+write_up.html

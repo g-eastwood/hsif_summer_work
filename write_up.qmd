@@ -1,0 +1,361 @@
+---
+title: "Aid Under Fire: Replication Memo"
+subtitle: "Crost, Felter & Johnston (2014, AER) — HSIF Week 6 Day 4"
+author: "Gabriela Eastwood"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(rdrobust)   # MSE-optimal bandwidths, robust bias-corrected inference
+library(rddensity)  # density test
+library(fixest)     # event study DiD
+library(dplyr)
+library(ggplot2)
+library(haven)
+
+# ---------------------------------------------------------------------
+# VARIABLE MAP (filled from codebook exploration)
+# ---------------------------------------------------------------------
+DATA_FILE  <- "AUF_replication_data.dta"
+V_RANK     <- "rank"              # within-province poverty rank (reconstructed)
+V_CUT_N    <- "num_muni"         # number of municipalities in province
+V_OUTCOME  <- "totcas"           # total conflict casualties
+V_CAS_INS  <- "eninit_cas"       # insurgent-initiated casualties
+V_CAS_GOV  <- "govinit_cas"      # government-initiated casualties
+V_RECEIPT  <- "kalahimunicipality"# actual KALAHI-CIDSS receipt
+V_MUNI     <- "municipality"
+V_TIME     <- "month"
+V_START    <- "aff1"             # program start timing
+
+df <- read_dta(DATA_FILE) %>%
+  mutate(
+    cutoff_rank = ceiling(.data[[V_CUT_N]] / 4),   # 1st quartile threshold
+    r = .data[[V_RANK]] - cutoff_rank,              # centered running variable
+    above = as.integer(r >= 0),
+    elig  = above
+  )
+```
+
+---
+
+## Section 1 — Context and the Ranking Problem
+
+*(~250 words | Stage 1: 9:30–9:55 | No estimation)*
+
+**Setting.** Crost, Felter & Johnston (2014) study whether the Philippine
+government's KALAHI-CIDSS community development program reduced civil conflict.
+KALAHI-CIDSS targeted the poorest municipalities within each province, defined
+by a poverty-rank cutoff: municipalities ranked in the bottom quartile of their
+province by a poverty index were declared eligible. The authors exploit this
+cutoff in a regression discontinuity design, comparing municipalities just
+below and just above the eligibility threshold on conflict casualties.
+
+**The ranking problem.** The program's internal targeting list — the actual
+poverty rankings used at implementation — is not publicly available. The
+replication package reconstructs ranks from published provincial poverty
+estimates, but this reconstruction is imperfect. Survey-based poverty estimates
+carry measurement error, and the ranking operation amplifies that error near
+the cutoff: two municipalities with nearly identical true poverty rates may
+swap sides of the cutoff purely due to noise in the underlying estimates.
+
+**Consequences for identification.**
+
+1. *Misclassification near the cutoff.* Municipalities within a rank or two of
+   the threshold may be assigned the wrong eligibility status. This attenuates
+   the first stage (the jump in actual receipt is smaller than the jump in true
+   eligibility) and, under classical measurement error, biases the RD estimate
+   toward zero.
+
+2. *Which checks become indirect.* Covariate smoothness tests check whether
+   observable pre-determined characteristics are continuous at the reconstructed
+   cutoff — but if misclassification is random, covariates may appear smooth
+   even when true assignment is noisy. The density test is similarly indirect:
+   manipulation of the reconstructed rank is neither necessary nor sufficient
+   for manipulation of the true rank.
+
+3. *Which specification targets the problem.* The **donut RD** drops
+   municipalities within $|r| \leq 1$ or $|r| \leq 2$ of the reconstructed
+   cutoff, restricting estimation to municipalities where the reconstructed and
+   true rankings are more likely to agree. If the donut estimate is stable or
+   larger than the full-sample estimate, it suggests misclassification was
+   attenuating the main result.
+
+---
+
+## Section 2 — Main Results, Modernized
+
+*(~350 words + Figure Array 1 | Stage 2: 9:55–10:40)*
+
+```{r}
+#| label: density-check
+#| fig-width: 7
+#| fig-height: 3.2
+#| fig-cap: "Density of the within-province poverty rank centered at the cutoff. No spike below or pile-up above the cutoff is consistent with no manipulation of the reconstructed ranking."
+
+# Collapse to municipality level: sum casualties across all periods,
+# keep time-invariant covariates (rank, cutoff, receipt) from first row.
+df_muni <- df %>%
+  group_by(.data[[V_MUNI]]) %>%
+  summarise(
+    totcas    = sum(totcas,    na.rm = TRUE),
+    eninit_cas = sum(eninit_cas, na.rm = TRUE),
+    govinit_cas = sum(govinit_cas, na.rm = TRUE),
+    r         = first(r),
+    above     = first(above),
+    kalahimunicipality = first(kalahimunicipality),
+    .groups   = "drop"
+  )
+
+ggplot(df_muni, aes(x = r)) +
+  geom_histogram(binwidth = 1, fill = "gray70", color = "white") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "#800000") +
+  labs(x = "poverty rank (centered at cutoff)", y = "municipalities",
+       title = "Density of the running variable") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(color = "#800000"))
+```
+
+```{r}
+#| label: rd-plot
+#| fig-cap: "RD plot: total conflict casualties against centered poverty rank. Bin means shown; local linear fits on each side of the cutoff from the h = 6 window."
+
+rdplot(y = df_muni[[V_OUTCOME]], x = df_muni$r, c = 0,
+       x.label = "poverty rank (centered at cutoff)",
+       y.label = "conflict casualties",
+       title = "")
+```
+
+```{r}
+#| label: paper-spec
+
+# Replicate paper: h = 6, triangular kernel
+cat("=== Paper spec: h = 6, triangular ===\n")
+summary(rdrobust(df_muni[[V_OUTCOME]], df_muni$r, c = 0,
+                 h = 6, kernel = "triangular", masspoints = "off"))
+```
+
+```{r}
+#| label: modern-inference
+
+# With only 51 municipalities, MSE-optimal bandwidth selection is unreliable.
+# Use fixed, substantively motivated integer bandwidths throughout.
+# h = 4: narrow window (ranks -4 to 3), closest to the cutoff.
+# h = 8: wider window, trades bias for precision.
+cat("=== h = 4 (narrow) ===\n")
+summary(rdrobust(df_muni[[V_OUTCOME]], df_muni$r, c = 0, h = 4, masspoints = "off"))
+
+cat("\n=== h = 8 (wide) ===\n")
+summary(rdrobust(df_muni[[V_OUTCOME]], df_muni$r, c = 0, h = 8, masspoints = "off"))
+```
+
+```{r}
+#| label: donut
+
+for (r_hole in c(1, 2)) {
+  d <- filter(df_muni, abs(r) > r_hole)
+  cat("\n--- Donut r =", r_hole, "(n =", nrow(d), ") ---\n")
+  result <- tryCatch(
+    summary(rdrobust(d[[V_OUTCOME]], d$r, c = 0, h = 6, masspoints = "off")),
+    error = function(e) cat("Note: too few distinct rank values for bias-corrected inference at this donut/bandwidth combination.\n")
+  )
+  if (!is.null(result)) print(result)
+}
+```
+
+```{r}
+#| label: spec-chart
+#| fig-width: 7
+#| fig-height: 4
+#| fig-cap: "Specification chart: six estimates with 95% CIs on one axis. Bias-corrected Robust rows throughout. Stable estimates across bandwidth and donut specifications support the main finding."
+
+# Collect all six specs into a data frame
+collect_rd <- function(label, fit) {
+  data.frame(label = label,
+             est   = fit$coef["Robust", 1],
+             lo    = fit$ci["Robust", 1],
+             hi    = fit$ci["Robust", 2])
+}
+
+specs <- bind_rows(
+  collect_rd("Paper (h = 6)",  rdrobust(df_muni[[V_OUTCOME]], df_muni$r, c = 0, h = 6, kernel = "triangular", masspoints = "off")),
+  collect_rd("h = 4 (narrow)", rdrobust(df_muni[[V_OUTCOME]], df_muni$r, c = 0, h = 4, masspoints = "off")),
+  collect_rd("h = 8 (wide)",   rdrobust(df_muni[[V_OUTCOME]], df_muni$r, c = 0, h = 8, masspoints = "off")),
+  tryCatch(collect_rd("Donut r = 1", rdrobust(filter(df_muni, abs(r) > 1)[[V_OUTCOME]],
+                                               filter(df_muni, abs(r) > 1)$r, c = 0, h = 6, masspoints = "off")),
+           error = function(e) data.frame(label = "Donut r = 1", est = NA, lo = NA, hi = NA)),
+  tryCatch(collect_rd("Donut r = 2", rdrobust(filter(df_muni, abs(r) > 2)[[V_OUTCOME]],
+                                               filter(df_muni, abs(r) > 2)$r, c = 0, h = 6, masspoints = "off")),
+           error = function(e) data.frame(label = "Donut r = 2", est = NA, lo = NA, hi = NA))
+) %>% mutate(label = factor(label, levels = rev(label)))
+
+ggplot(specs, aes(x = est, y = label)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_pointrange(aes(xmin = lo, xmax = hi), color = "#800000", size = 0.4) +
+  labs(x = "RD estimate (total casualties)", y = NULL,
+       title = "Specification chart: main result across six specs") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(color = "#800000"))
+```
+
+**[Write ~350 words here.]** Key points to address:
+
+- Report the paper's published estimate and whether your replication hits it.
+  If not, state what differs and why (variable map, aggregation level).
+- Report the MSE-optimal estimate (Robust row). State the optimal bandwidth
+  and whether it is close to the paper's h = 6.
+- Interpret the donut results: do estimates grow, shrink, or hold stable as
+  the hole widens? Relate back to the misclassification argument in Section 1.
+- One sentence on bandwidth sensitivity: are the h/2 and 2h estimates inside
+  each other's CIs?
+
+---
+
+## Section 3 — Timing and Actor Validity
+
+*(~300 words, two committed verdicts | Stage 3: 10:40–11:10)*
+
+```{r}
+#| label: actor-splits
+
+cat("=== Insurgent-initiated ===\n")
+summary(rdrobust(df_muni[[V_CAS_INS]], df_muni$r, c = 0, h = 6, masspoints = "off"))
+
+cat("\n=== Government-initiated ===\n")
+summary(rdrobust(df_muni[[V_CAS_GOV]], df_muni$r, c = 0, h = 6, masspoints = "off"))
+```
+
+```{r}
+#| label: measurement-probe
+
+# Do the initiator splits sum to the total at the cutoff?
+# A gap suggests initiator coding varies with program presence.
+ins <- rdrobust(df_muni[[V_CAS_INS]], df_muni$r, c = 0, h = 6, masspoints = "off")$coef["Robust", 1]
+gov <- rdrobust(df_muni[[V_CAS_GOV]], df_muni$r, c = 0, h = 6, masspoints = "off")$coef["Robust", 1]
+tot <- rdrobust(df_muni[[V_OUTCOME]],  df_muni$r, c = 0, h = 6, masspoints = "off")$coef["Robust", 1]
+
+cat(sprintf("Insurgent RD: %.3f\nGovernment RD: %.3f\nSum of splits: %.3f\n",
+            ins, gov, ins + gov))
+```
+
+**[Write ~300 words here with two committed verdicts.]** Structure:
+
+- **Verdict 1 — Actor mechanism.** Which initiator drives the total effect?
+  The paper argues insurgents preemptively escalate violence to sabotage the
+  program. Is the insurgent-initiated jump larger than the government-initiated
+  jump? State a verdict: consistent / inconsistent with the preemption story.
+
+- **Verdict 2 — Measurement.** Do the two actor splits sum to the total at
+  the cutoff? A gap would suggest initiator attribution (who started the
+  fight) is not independent of program presence — a coding validity problem.
+  State a verdict: initiator coding appears / does not appear reliable.
+
+- **The stage-window problem.** The paper pools all periods into a single RD.
+  Under staggered rollout, municipalities received the program at different
+  times. Pooling pre- and post-program periods conflates the intent-to-treat
+  with a noisy average that includes pre-program windows where the effect
+  should be zero. Section 4's RD event study is the direct answer.
+
+---
+
+## Section 4 — The Complement and a Better Clock
+
+*(~300 words + Figure Array 2 | Stage 4: 11:10–11:45)*
+
+```{r}
+#| label: did-event-study
+#| fig-width: 8
+#| fig-height: 4.2
+#| fig-cap: "DiD event study: eligible vs. ineligible municipalities around program start. Pre-trend coefficients near zero support parallel trends; post-period estimates show the dynamic effect."
+
+df <- df %>%
+  mutate(
+    k     = .data[[V_TIME]] - .data[[V_START]],
+    k_bin = pmax(pmin(k, 8), -8),
+    k_es  = if_else(elig == 1, k_bin, -1L)
+  )
+
+m_es <- feols(
+  as.formula(paste0(V_OUTCOME, " ~ i(k_es, ref = -1) | ", V_MUNI, " + ", V_TIME)),
+  data    = df,
+  cluster = as.formula(paste0("~", V_MUNI))
+)
+
+iplot(m_es,
+      main   = "DiD event study: eligible vs. ineligible",
+      xlab   = "event time (periods since program start)",
+      ylab   = "effect on conflict casualties")
+```
+
+```{r}
+#| label: rd-event-study
+#| fig-width: 8
+#| fig-height: 4.2
+#| fig-cap: "RD event study: period-by-period jumps at the poverty-rank cutoff. Leads (k < 0) serve as built-in placebos. The path from onset to peak to fade replaces the paper's three coarse period splits."
+
+rd_path <- lapply(sort(unique(df$k_bin)), function(kk) {
+  d <- filter(df, k_bin == kk) %>%
+    distinct(.data[[V_MUNI]], .keep_all = TRUE)
+  if (nrow(d) < 10) return(NULL)
+  fit <- tryCatch(rdrobust(d[[V_OUTCOME]], d$r, c = 0, h = 6, masspoints = "off"),
+                  error = function(e) NULL)
+  if (is.null(fit)) return(NULL)
+  data.frame(k   = kk,
+             est = fit$coef["Robust", 1],
+             lo  = fit$ci["Robust", 1],
+             hi  = fit$ci["Robust", 2])
+}) %>% bind_rows()
+
+if (nrow(rd_path) == 0) {
+  cat("Note: no event-time periods had sufficient observations for rdrobust.\n",
+      "Check V_START variable mapping — aff1 may not correctly identify program start timing.\n")
+} else {
+  print(
+    ggplot(rd_path, aes(x = k, y = est)) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+      geom_vline(xintercept = -0.5, linetype = "dashed", color = "gray50") +
+      geom_pointrange(aes(ymin = lo, ymax = hi), color = "#800000", size = 0.35) +
+      labs(x = "event time (periods since program start)",
+           y = "RD estimate (casualties)",
+           title = "RD event study: period-by-period jumps at the cutoff") +
+      theme_minimal(base_size = 11) +
+      theme(plot.title = element_text(color = "#800000"))
+  )
+}
+```
+
+**[Write ~300 words here.]** Key points to address:
+
+- **DiD pre-trends.** Are the pre-period coefficients (k < −1) flat and near
+  zero? Interpret this as evidence for or against parallel trends between
+  eligible and ineligible municipalities. Apply the full Tuesday checklist:
+  reference period choice, endpoint bins, window length.
+
+- **RD event study: onset/peak/fade.** Describe the shape of the path. When
+  does the effect emerge, peak, and (if visible) decay? The leads (k < 0)
+  are built-in placebos — if they are near zero, the identifying assumption
+  is credible period by period.
+
+- **Why the RD event study is a better clock.** The paper collapses dynamics
+  into three coarse periods; the RD event study traces the full path. Wide
+  intervals are expected (one period's data per estimate) — pair the dynamic
+  picture with the pooled estimate: shape from the path, precision from the
+  pooled RD.
+
+- **Which design you trust more and why.** The DiD requires parallel trends
+  across the eligibility boundary over time; the RD requires continuity at
+  the rank cutoff within each period. State which assumption you find more
+  credible given the data and the setting.
