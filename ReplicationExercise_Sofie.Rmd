@@ -1,0 +1,62 @@
+---
+title: "ReplicationAIDUnderFire"
+output: html_document
+date: "2026-08-28"
+---
+```{r}
+#read in libraries
+
+library(rdrobust)   
+library(rddensity) 
+library(fixest)     
+library(dplyr)
+library(ggplot2)
+library(haven)   
+```
+
+```{r}
+#variable map
+
+DATA_FILE  <- "AUF_replication_data.dta"
+V_RANK     <- "rank"              # within-province poverty rank (reconstructed)
+V_CUT_N    <- "num_muni"         # number of municipalities in province
+V_OUTCOME  <- "totcas"           # total conflict casualties
+V_CAS_INS  <- "eninit_cas"       # insurgent-initiated casualties
+V_CAS_GOV  <- "govinit_cas"      # government-initiated casualties
+V_RECEIPT  <- "kalahimunicipality"# actual KALAHI-CIDSS receipt
+V_MUNI     <- "municipality"
+V_TIME     <- "month"
+V_START    <- "aff1"             # program start timing
+
+df <- read_dta(DATA_FILE) %>%
+  mutate(
+    quartile  = round(.data[[V_CUT_N]] / 4),          # matches Stata round()
+    rank_norm = .data[[V_RANK]] - quartile - 0.5,     # correct sign + 0.5 offset
+    eligible  = as.integer(rank_norm <= 0),
+    el_rank   = eligible * rank_norm,
+    r2        = rank_norm^2,
+    elr2      = el_rank^2
+  ) %>%
+  filter(rank_norm >= -6 & rank_norm <= 6)             # bandwidth restriction
+
+df <- df %>% filter(month >= 516 & month <= 551)
+```
+
+```{r}
+#paper's specification
+summary(rdrobust(df[[V_OUTCOME]], -df$rank_norm, c = 0, h = 6, kernel = "triangular"))
+```
+
+```{r}
+#rd plot
+
+rdplot(
+  y = df[[V_OUTCOME]],
+  x = df$rank_norm,
+  c = 0,
+  p=2,
+  x.label = "Poverty rank (centered at cutoff)",
+  y.label = "Conflict casualties"
+)
+```
+
