@@ -69,14 +69,10 @@ print(paper_summary)
 ```{r}
 #rd plot
 
-rdplot(
-  y = df[[V_OUTCOME]],
-  x = df$rank_norm,
-  c = 0,
-  p = 2, 
-  x.label = "Poverty rank (centered at cutoff)",
-  y.label = "Conflict casualties"
-)
+rdplot(y = df[[V_OUTCOME]], x = df$rank_norm, c = 0, p=2,
+       x.lim = c(-6, 6),
+       x.label = "poverty rank (centered at cutoff)",
+       y.label = "conflict casualties")
 ```
 
 ```{r}
